@@ -11,17 +11,7 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load Scientific Knowledge Base
-// In Vercel, the root directory is one level up from the /api folder
-const knowledgePath = path.resolve(__dirname, '..', 'knowledge_base.json');
-let knowledgeBase: any;
-try {
-    knowledgeBase = JSON.parse(fs.readFileSync(knowledgePath, 'utf-8'));
-} catch (error) {
-    console.error('Error loading knowledge base:', error);
-    // Fallback or empty object if not found
-    knowledgeBase = { fertilizer_logic: {} };
-}
+import knowledgeBase from '../knowledge_base.json';
 
 const app = express();
 
