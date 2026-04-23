@@ -496,8 +496,11 @@ export default function App() {
             })
         });
 
-        if (!response.ok) throw new Error('Backend analysis failed');
-        const result = await response.json() as CropAnalysis;
+        const responseData = await response.json();
+        if (!response.ok) {
+            throw new Error(responseData.error || 'Backend analysis failed');
+        }
+        const result = responseData as CropAnalysis;
 
         clearInterval(interval);
         setProgress(100);
@@ -508,21 +511,23 @@ export default function App() {
            
            const id = Date.now().toString();
            setCurrentId(id);
+           // Store base64 data URL for history (blob URLs break on reload)
+           const historyThumb = imagesData[0] ? `data:${imagesData[0].mimeType};base64,${imagesData[0].data.substring(0, 5000)}` : imagePreviewUrls[0];
            const newItem: HistoryItem = {
              id,
              timestamp: Date.now(),
-             image: imagePreviewUrls[0], // Store first image in history for thumbnail
+             image: historyThumb,
              analysis: result
            };
            updateHistory([newItem, ...history]);
            toast.success('Analysis complete!');
         }, 600);
 
-    } catch (error) {
+    } catch (error: any) {
         clearInterval(interval);
         setIsAnalyzing(false);
         console.error('Analysis error:', error);
-        toast.error('Failed to analyze the image. Please try again.');
+        toast.error(error.message || 'Failed to analyze the image. Please try again.');
     }
   };
 
@@ -541,11 +546,11 @@ export default function App() {
             language: selectedLanguage
         })
       });
-      if (!response.ok) throw new Error('Encyclopedia search failed');
-      const result = await response.json();
-      setEncResult(result);
-    } catch {
-      toast.error('Failed to search encyclopedia.');
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Encyclopedia search failed');
+      setEncResult(data);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to search encyclopedia.');
     } finally {
       setIsEncSearching(false);
     }
@@ -566,52 +571,61 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           message: userMessage, 
-          history: chatMessages.slice(-6), // Keep last 3 turns for context
+          history: chatMessages.slice(-6),
           language: selectedLanguage 
         })
       });
-      if (!response.ok) throw new Error('Chat failed');
       const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Chat failed');
       setChatMessages(prev => [...prev, { role: 'ai', content: data.response }]);
-    } catch {
-      toast.error('Doctor AI is unavailable right now.');
+    } catch (err: any) {
+      toast.error(err.message || 'Doctor AI is unavailable right now.');
     } finally {
       setIsChatting(false);
     }
   };
 
+  const fetchAlertsForCoords = async (latitude: number, longitude: number) => {
+    try {
+        const response = await fetch(`${API_BASE_URL}/api/alerts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ latitude, longitude, language: selectedLanguage })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Alerts fetch failed');
+        setLocalAlerts(data);
+        toast.success("Local alerts updated successfully.");
+    } catch (e: any) {
+        toast.error(e.message || "Failed to fetch local trends.");
+    } finally {
+        setIsFetchingAlerts(false);
+    }
+  };
+
   const requestLocationAndAlerts = () => {
     setIsFetchingAlerts(true);
+    
+    // Default fallback coordinates (Hyderabad, India)
+    const DEFAULT_LAT = 17.385;
+    const DEFAULT_LON = 78.4867;
+
     if (!navigator.geolocation) {
-       toast.error("Geolocation is not supported by your browser");
-       setIsFetchingAlerts(false);
+       toast.info("Geolocation not supported. Using default location (Hyderabad).");
+       fetchAlertsForCoords(DEFAULT_LAT, DEFAULT_LON);
        return;
     }
-    navigator.geolocation.getCurrentPosition(async (position) => {
-        const { latitude, longitude } = position.coords;
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/alerts`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    latitude, 
-                    longitude,
-                    language: selectedLanguage
-                })
-            });
-            if (!response.ok) throw new Error('Alerts fetch failed');
-            const result = await response.json();
-            setLocalAlerts(result);
-            toast.success("Local alerts updated successfully.");
-        } catch (e) {
-            toast.error("Failed to fetch local trends.");
-        } finally {
-            setIsFetchingAlerts(false);
-        }
-    }, () => {
-        toast.error("Location permission denied. Cannot fetch local alerts.");
-        setIsFetchingAlerts(false);
-    });
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        fetchAlertsForCoords(position.coords.latitude, position.coords.longitude);
+      }, 
+      () => {
+        // Permission denied or error — use fallback location
+        toast.info("Location not available. Using default location (Hyderabad).");
+        fetchAlertsForCoords(DEFAULT_LAT, DEFAULT_LON);
+      },
+      { enableHighAccuracy: false, timeout: 5000, maximumAge: 300000 }
+    );
   };
 
   const calculateSoilScore = (s: CropAnalysis['soilFertility']) => {
@@ -687,38 +701,38 @@ export default function App() {
       <Toaster position="top-center" />
       
       {/* Header & Navigation */}
-      <header className="flex flex-col items-center justify-center mb-8 gap-2 relative max-w-6xl mx-auto">
-        <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="w-16 h-16 bg-white rounded-full shadow-lg flex items-center justify-center mb-2 text-leaf border border-soft">
-          <Sprout className="w-8 h-8 text-leaf" />
+      <header className="flex flex-col items-center justify-center mb-6 sm:mb-8 gap-2 relative max-w-6xl mx-auto">
+        <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="w-12 h-12 sm:w-16 sm:h-16 bg-white rounded-full shadow-lg flex items-center justify-center mb-1 sm:mb-2 text-leaf border border-soft">
+          <Sprout className="w-6 h-6 sm:w-8 sm:h-8 text-leaf" />
         </motion.div>
-        <motion.h1 initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="serif text-4xl font-semibold tracking-wide text-leaf">{t.app_title}</motion.h1>
+        <motion.h1 initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="serif text-2xl sm:text-4xl font-semibold tracking-wide text-leaf">{t.app_title}</motion.h1>
         
-        <div className="absolute top-0 right-0 flex items-center gap-3">
+        <div className="mt-2 sm:mt-0 sm:absolute sm:top-0 sm:right-0 flex items-center gap-3">
           <select 
             value={selectedLanguage} 
             onChange={(e) => setSelectedLanguage(e.target.value)}
-            className="bg-white border border-stone-200 text-xs font-bold rounded-full px-4 py-2 outline-none shadow-sm hover:border-leaf transition-all cursor-pointer appearance-none pr-10 relative bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%233A5A40%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C/polyline%3E%3C/svg%3E')] bg-[length:14px_14px] bg-[right_12px_center] bg-no-repeat ring-leaf/20 focus:ring-4"
+            className="bg-white border border-stone-200 text-xs font-bold rounded-full px-3 sm:px-4 py-2 outline-none shadow-sm hover:border-leaf transition-all cursor-pointer appearance-none pr-8 sm:pr-10 relative bg-[url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20width%3D%2224%22%20height%3D%2224%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%233A5A40%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%226%209%2012%2015%2018%209%22%3E%3C/polyline%3E%3C/svg%3E')] bg-[length:14px_14px] bg-[right_10px_center] bg-no-repeat ring-leaf/20 focus:ring-4"
           >
             <option value="English">English</option>
             <option value="Hindi">हिन्दी (Hindi)</option>
             <option value="Telugu">తెలుగు (Telugu)</option>
-            <option value="Marathi">मਰਾठी (Marathi)</option>
+            <option value="Marathi">मराठी (Marathi)</option>
             <option value="Punjabi">ਪੰਜਾਬੀ (Punjabi)</option>
           </select>
         </div>
 
-        <div className="flex gap-2 mt-4 bg-white/60 p-1.5 rounded-full border border-stone-200 shadow-sm backdrop-blur">
-           <button onClick={() => setViewMode('analyze')} className={`px-5 py-2 rounded-full text-xs font-bold uppercase tracking-widest transition-all ${viewMode === 'analyze' ? 'bg-leaf text-white shadow-md' : 'text-stone-500 hover:bg-white'}`}>
-             <Search className="w-3.5 h-3.5 inline mr-1" /> {t.analyze}
+        <div className="flex flex-wrap justify-center gap-1.5 sm:gap-2 mt-3 sm:mt-4 bg-white/60 p-1 sm:p-1.5 rounded-2xl sm:rounded-full border border-stone-200 shadow-sm backdrop-blur w-full sm:w-auto">
+           <button onClick={() => setViewMode('analyze')} className={`px-3 sm:px-5 py-1.5 sm:py-2 rounded-full text-[10px] sm:text-xs font-bold uppercase tracking-wider sm:tracking-widest transition-all ${viewMode === 'analyze' ? 'bg-leaf text-white shadow-md' : 'text-stone-500 hover:bg-white'}`}>
+             <Search className="w-3 h-3 sm:w-3.5 sm:h-3.5 inline mr-0.5 sm:mr-1" /> {t.analyze}
            </button>
-           <button onClick={() => setViewMode('encyclopedia')} className={`px-5 py-2 rounded-full text-xs font-bold uppercase tracking-widest transition-all ${viewMode === 'encyclopedia' ? 'bg-leaf text-white shadow-md' : 'text-stone-500 hover:bg-white'}`}>
-             <BookOpen className="w-3.5 h-3.5 inline mr-1" /> {t.encyclopedia}
+           <button onClick={() => setViewMode('encyclopedia')} className={`px-3 sm:px-5 py-1.5 sm:py-2 rounded-full text-[10px] sm:text-xs font-bold uppercase tracking-wider sm:tracking-widest transition-all ${viewMode === 'encyclopedia' ? 'bg-leaf text-white shadow-md' : 'text-stone-500 hover:bg-white'}`}>
+             <BookOpen className="w-3 h-3 sm:w-3.5 sm:h-3.5 inline mr-0.5 sm:mr-1" /> {t.encyclopedia}
            </button>
-           <button onClick={() => setViewMode('history')} className={`px-5 py-2 rounded-full text-xs font-bold uppercase tracking-widest transition-all ${viewMode === 'history' ? 'bg-leaf text-white shadow-md' : 'text-stone-500 hover:bg-white'}`}>
-             <History className="w-3.5 h-3.5 inline mr-1" /> {t.history}
+           <button onClick={() => setViewMode('history')} className={`px-3 sm:px-5 py-1.5 sm:py-2 rounded-full text-[10px] sm:text-xs font-bold uppercase tracking-wider sm:tracking-widest transition-all ${viewMode === 'history' ? 'bg-leaf text-white shadow-md' : 'text-stone-500 hover:bg-white'}`}>
+             <History className="w-3 h-3 sm:w-3.5 sm:h-3.5 inline mr-0.5 sm:mr-1" /> {t.history}
            </button>
-           <button onClick={() => setViewMode('chat')} className={`px-5 py-2 rounded-full text-xs font-bold uppercase tracking-widest transition-all ${viewMode === 'chat' ? 'bg-leaf text-white shadow-md' : 'text-stone-500 hover:bg-white'}`}>
-             <MessageSquare className="w-3.5 h-3.5 inline mr-1" /> {t.doctor_ai}
+           <button onClick={() => setViewMode('chat')} className={`px-3 sm:px-5 py-1.5 sm:py-2 rounded-full text-[10px] sm:text-xs font-bold uppercase tracking-wider sm:tracking-widest transition-all ${viewMode === 'chat' ? 'bg-leaf text-white shadow-md' : 'text-stone-500 hover:bg-white'}`}>
+             <MessageSquare className="w-3 h-3 sm:w-3.5 sm:h-3.5 inline mr-0.5 sm:mr-1" /> {t.doctor_ai}
            </button>
         </div>
       </header>

@@ -14,112 +14,152 @@ const __dirname = path.dirname(__filename);
 import knowledgeBase from '../knowledge_base.json';
 
 const app = express();
-
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 const apiKey = process.env.GEMINI_API_KEY;
 const genAI = new GoogleGenerativeAI(apiKey || "");
 
+const MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite"];
+
+function getModel(modelName: string, jsonMode = false) {
+    const config: any = {};
+    if (jsonMode) config.responseMimeType = "application/json";
+    return genAI.getGenerativeModel({ model: modelName, generationConfig: config });
+}
+
+async function generateWithFallback(
+    buildRequest: (modelName: string) => Promise<any>,
+    maxRetriesPerModel = 2
+): Promise<any> {
+    let lastError: any;
+    for (const modelName of MODELS) {
+        for (let attempt = 0; attempt <= maxRetriesPerModel; attempt++) {
+            try {
+                return await buildRequest(modelName);
+            } catch (error: any) {
+                lastError = error;
+                if (error?.status === 429) {
+                    if (attempt < maxRetriesPerModel) {
+                        await new Promise(r => setTimeout(r, (attempt + 1) * 2000 + Math.random() * 1000));
+                        continue;
+                    }
+                    break;
+                }
+                throw error;
+            }
+        }
+    }
+    throw lastError || new Error('All models exhausted');
+}
+
+function safeParseJSON(text: string) {
+    try { return JSON.parse(text); } catch {
+        const m = text.match(/\{[\s\S]*\}/);
+        if (m) return JSON.parse(m[0]);
+        return null;
+    }
+}
+
 app.post('/api/analyze', async (req, res) => {
     try {
         const { images, language = 'English' } = req.body;
-        const model = genAI.getGenerativeModel({ 
-            model: "gemini-1.5-flash",
-            generationConfig: { 
-                responseMimeType: "application/json"
-            }
-        });
+        if (!images?.length) return res.status(400).json({ error: 'No images provided.' });
 
-        const prompt = `
-            Analyze these crop images. Identify plant and disease. 
-            Ground with: ${JSON.stringify(knowledgeBase.fertilizer_logic)}
-            Return JSON matching:
-            {
-                "diseaseResult": "string",
-                "solution": "string",
-                "preventiveMeasures": ["string"],
-                "soilFertility": { "pH": "string", "nitrogen": "string", "phosphorus": "string", "potassium": "string", "soilType": "string" },
-                "fertilizerCost": { "urea": "string", "dap": "string", "mop": "string", "totalCost": "string" },
-                "nextCropRecommendation": "string"
-            }
-            Language: ${language}.
-        `;
+        const prompt = `You are an expert agricultural scientist. Analyze the plant/crop/vegetable/fruit images.
+Reference: ${JSON.stringify(knowledgeBase.fertilizer_logic)}
+Return valid JSON:
+{"diseaseResult":"string","solution":"string","preventiveMeasures":["string"],"soilFertility":{"pH":"string","nitrogen":"string","phosphorus":"string","potassium":"string","soilType":"string"},"fertilizerCost":{"urea":"string","dap":"string","mop":"string","totalCost":"string"},"nextCropRecommendation":"string"}
+Respond in ${language}.`;
 
         const imageParts = images.map((img: any) => ({
-            inlineData: { data: img.data, mimeType: img.mimeType }
+            inlineData: { data: img.data, mimeType: img.mimeType || 'image/jpeg' }
         }));
 
-        const result = await model.generateContent([prompt, ...imageParts]);
-        res.json(JSON.parse(result.response.text()));
+        const result = await generateWithFallback(async (modelName) => {
+            const model = getModel(modelName, true);
+            return await model.generateContent([prompt, ...imageParts]);
+        });
+
+        const parsed = safeParseJSON(result.response.text());
+        parsed ? res.json(parsed) : res.status(500).json({ error: 'Invalid AI response.' });
     } catch (error: any) {
-        console.error('Analysis error:', error);
-        res.status(500).json({ error: error.message });
+        res.status(error?.status === 429 ? 429 : 500).json({
+            error: error?.status === 429 ? 'Rate limit reached. Wait 30s.' : (error.message || 'Analysis failed.')
+        });
     }
 });
 
 app.post('/api/chat', async (req, res) => {
     try {
         const { message, history = [], language = 'English' } = req.body;
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        
-        const chat = model.startChat({
-            history: history.map((h: any) => ({
-                role: h.role === 'user' ? 'user' : 'model',
-                parts: [{ text: h.content }]
-            })),
-            generationConfig: {
-                maxOutputTokens: 1000,
-            }
+        if (!message?.trim()) return res.status(400).json({ error: 'Empty message.' });
+
+        const safeHistory = history.filter((h: any) => h?.content && h?.role).map((h: any) => ({
+            role: h.role === 'user' ? 'user' : 'model', parts: [{ text: h.content }]
+        }));
+
+        const result = await generateWithFallback(async (modelName) => {
+            const model = genAI.getGenerativeModel({ model: modelName });
+            const chat = model.startChat({ history: safeHistory, generationConfig: { maxOutputTokens: 1500 } });
+            return await chat.sendMessage(`You are "Doctor AI", agricultural expert. Respond in ${language}.\n\nUser: ${message}`);
         });
 
-        const systemPrompt = `You are "Doctor AI", a professional agricultural expert. Respond in ${language}.`;
-        const result = await chat.sendMessage(message + "\n\n" + systemPrompt);
         res.json({ response: result.response.text() });
     } catch (error: any) {
-        console.error('Chat error:', error);
-        res.status(500).json({ error: error.message });
+        res.status(error?.status === 429 ? 429 : 500).json({
+            error: error?.status === 429 ? 'Rate limit reached. Wait and retry.' : (error.message || 'Chat failed.')
+        });
     }
 });
 
 app.post('/api/encyclopedia', async (req, res) => {
     try {
         const { query, language = 'English' } = req.body;
-        const model = genAI.getGenerativeModel({ 
-            model: "gemini-1.5-flash",
-            generationConfig: { responseMimeType: "application/json" }
+        if (!query?.trim()) return res.status(400).json({ error: 'Empty query.' });
+
+        const prompt = `Agricultural encyclopedia for "${query}". Return JSON: {"cropName":"","scientificName":"","description":"","growthCycle":"","commonDiseases":[],"idealSoil":"","optimalHarvest":""}. Respond in ${language}.`;
+
+        const result = await generateWithFallback(async (modelName) => {
+            const model = getModel(modelName, true);
+            return await model.generateContent(prompt);
         });
 
-        const prompt = `Provide encyclopedia info for ${query} in JSON. Language: ${language}. Fields: cropName, scientificName, description, growthCycle, commonDiseases[], idealSoil, optimalHarvest.`;
-        const result = await model.generateContent(prompt);
-        res.json(JSON.parse(result.response.text()));
+        const parsed = safeParseJSON(result.response.text());
+        parsed ? res.json(parsed) : res.status(500).json({ error: 'Parse failed.' });
     } catch (error: any) {
-        res.status(500).json({ error: error.message });
+        res.status(error?.status === 429 ? 429 : 500).json({
+            error: error?.status === 429 ? 'Rate limit. Wait and retry.' : (error.message || 'Encyclopedia failed.')
+        });
     }
 });
 
 app.post('/api/alerts', async (req, res) => {
     try {
         const { latitude, longitude, language = 'English' } = req.body;
-        const model = genAI.getGenerativeModel({ 
-            model: "gemini-1.5-flash",
-            generationConfig: { responseMimeType: "application/json" }
+        const prompt = `Ag alerts for lat:${latitude}, lon:${longitude}. Return JSON: {"region":"","alerts":[],"weather":{"temp":"","humidity":"","condition":""}}. Respond in ${language}.`;
+
+        const result = await generateWithFallback(async (modelName) => {
+            const model = getModel(modelName, true);
+            return await model.generateContent(prompt);
         });
 
-        const prompt = `Estimate regional ag alerts and weather for lat:${latitude}, lon:${longitude} in JSON. Language: ${language}. Fields: region, alerts[], weather:{temp, humidity, condition}.`;
-        const result = await model.generateContent(prompt);
-        res.json(JSON.parse(result.response.text()));
+        const parsed = safeParseJSON(result.response.text());
+        parsed ? res.json(parsed) : res.status(500).json({ error: 'Parse failed.' });
     } catch (error: any) {
-        res.status(500).json({ error: error.message });
+        res.status(error?.status === 429 ? 429 : 500).json({
+            error: error?.status === 429 ? 'Rate limit.' : (error.message || 'Alerts failed.')
+        });
     }
 });
 
-// For local testing
+app.get('/api/health', (_req, res) => {
+    res.json({ status: 'ok', apiKeySet: !!apiKey, models: MODELS });
+});
+
 if (process.env.NODE_ENV !== 'production') {
     const port = process.env.PORT || 3004;
-    app.listen(port, () => {
-        console.log(`Backend running on port ${port}`);
-    });
+    app.listen(port, () => console.log(`Backend on port ${port}`));
 }
 
 export default app;
